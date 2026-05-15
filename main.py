@@ -232,20 +232,26 @@ def cloud_providers_in_priority() -> list[str]:
 
 
 def build_messages(history: list[ChatMessage], user_message: str) -> list[dict[str, str]]:
-    messages = [{"role": "system", "content": "You are a helpful, concise assistant."}]
-    messages.extend({"role": item.role, "content": item.content} for item in history)
+    messages = [{"role": item.role, "content": item.content} for item in history]
+    if not any(item["role"] == "system" for item in messages):
+        messages.insert(0, {"role": "system", "content": "You are a helpful, concise assistant."})
     messages.append({"role": "user", "content": user_message})
     return messages
+
+
+def normalize_model_name(model_name: str) -> str:
+    return model_name.split(":", maxsplit=1)[0]
 
 
 def ollama_model_available() -> bool:
     base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
     model = os.getenv("OLLAMA_MODEL", "llama3")
+    normalized_model = normalize_model_name(model)
     try:
         response = requests.get(f"{base_url}/api/tags", timeout=5)
         response.raise_for_status()
         models = response.json().get("models", [])
-        return any(item.get("name", "").split(":")[0] == model.split(":")[0] for item in models)
+        return any(normalize_model_name(item.get("name", "")) == normalized_model for item in models)
     except requests.RequestException:
         return False
 
@@ -269,10 +275,26 @@ def call_gemini(messages: list[dict[str, str]]) -> str:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
     model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-    prompt = "\n".join(f'{m["role"]}: {m["content"]}' for m in messages)
+    system_instruction = None
+    contents: list[dict[str, Any]] = []
+    for message in messages:
+        role = message["role"]
+        content = message["content"]
+        if role == "system" and system_instruction is None:
+            system_instruction = {"parts": [{"text": content}]}
+            continue
+        contents.append(
+            {
+                "role": "model" if role == "assistant" else "user",
+                "parts": [{"text": content}],
+            }
+        )
     response = requests.post(
         url,
-        json={"contents": [{"parts": [{"text": prompt}]}]},
+        json={
+            "system_instruction": system_instruction,
+            "contents": contents or [{"role": "user", "parts": [{"text": ""}]}],
+        },
         timeout=60,
     )
     response.raise_for_status()
@@ -386,8 +408,10 @@ def chat(payload: ChatRequest) -> ChatResponse:
     try:
         reply = run_provider(selected_provider, messages)
     except requests.RequestException as exc:
-        return ChatResponse(error=f"{selected_provider} request failed: {exc}")
-    except (KeyError, IndexError, TypeError, RuntimeError) as exc:
-        return ChatResponse(error=f"{selected_provider} response error: {exc}")
+        details = ""
+        if exc.response is not None:
+            details = f" (status: {exc.response.status_code})"
+        return ChatResponse(error=f"{selected_provider} request failed{details}. Check provider configuration and connectivity.")
+    except (KeyError, IndexError, TypeError, RuntimeError):
+        return ChatResponse(error=f"{selected_provider} response format was invalid or incomplete.")
     return ChatResponse(reply=reply, provider=selected_provider)
-
