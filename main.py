@@ -43,6 +43,14 @@ OLLAMA_DISCOVERY_TIMEOUT_SECONDS = int_env("OLLAMA_DISCOVERY_TIMEOUT_SECONDS", 5
 PROVIDER_REQUEST_TIMEOUT_SECONDS = int_env("PROVIDER_REQUEST_TIMEOUT_SECONDS", 60)
 
 
+def get_ollama_base_url() -> str:
+    return os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+
+
+def get_ollama_model() -> str:
+    return os.getenv("OLLAMA_MODEL", "llama3")
+
+
 FRONTEND_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -74,6 +82,7 @@ FRONTEND_TEMPLATE = """
         const [loading, setLoading] = useState(false);
         const [provider, setProvider] = useState("not selected");
         const [pendingConfirmation, setPendingConfirmation] = useState(null);
+        const [pendingRequest, setPendingRequest] = useState(null);
         const [error, setError] = useState("");
 
         const theme = useMemo(() => createTheme({ palette: { mode } }), [mode]);
@@ -83,20 +92,28 @@ FRONTEND_TEMPLATE = """
           content: m.text
         }));
 
-        const sendMessage = async (allowFallback = false) => {
-          if (!input.trim()) return;
-          const userText = input.trim();
-          setInput("");
+        const sendMessage = async ({
+          allowFallback = false,
+          textOverride = null,
+          historyOverride = null,
+          appendUser = true
+        } = {}) => {
+          const userText = (textOverride ?? input).trim();
+          if (!userText) return;
+          if (!textOverride) setInput("");
           setError("");
-          setMessages((prev) => [...prev, { role: "user", text: userText }]);
+          if (appendUser) {
+            setMessages((prev) => [...prev, { role: "user", text: userText }]);
+          }
           setLoading(true);
           try {
+            const historyForRequest = historyOverride ?? conversationHistory;
             const res = await fetch("/api/chat", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 message: userText,
-                history: conversationHistory,
+                history: historyForRequest,
                 allow_fallback: allowFallback
               })
             });
@@ -109,10 +126,15 @@ FRONTEND_TEMPLATE = """
                 text: data.confirmation_message || "Fallback needed.",
                 providers: data.available_cloud_providers || []
               });
+              setPendingRequest({
+                message: userText,
+                history: historyForRequest
+              });
               setMessages((prev) => [...prev, { role: "bot", text: data.confirmation_message || "Fallback required before continuing." }]);
             } else if (data.reply) {
               setProvider(data.provider || "unknown");
               setPendingConfirmation(null);
+              setPendingRequest(null);
               setMessages((prev) => [...prev, { role: "bot", text: data.reply }]);
             }
           } catch (e) {
@@ -125,14 +147,17 @@ FRONTEND_TEMPLATE = """
         const handleConfirmFallback = async (accept) => {
           if (!accept) {
             setPendingConfirmation(null);
+            setPendingRequest(null);
             setMessages((prev) => [...prev, { role: "bot", text: "Okay, fallback canceled. Please configure a local model in Ollama or choose another setup." }]);
             return;
           }
-          if (!messages.length) return;
-          const lastUser = [...messages].reverse().find((m) => m.role === "user");
-          if (!lastUser) return;
-          setInput(lastUser.text);
-          await sendMessage(true);
+          if (!pendingRequest) return;
+          await sendMessage({
+            allowFallback: true,
+            textOverride: pendingRequest.message,
+            historyOverride: pendingRequest.history,
+            appendUser: false
+          });
         };
 
         return (
@@ -204,11 +229,11 @@ FRONTEND_TEMPLATE = """
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
-                        if (!loading) sendMessage(false);
+                        if (!loading) sendMessage();
                       }
                     }}
                   />
-                  <Button variant="contained" disabled={loading} onClick={() => sendMessage(false)}>Send</Button>
+                  <Button variant="contained" disabled={loading} onClick={() => sendMessage()}>Send</Button>
                 </Stack>
               </Box>
             </Box>
@@ -272,8 +297,8 @@ def normalize_model_name(model_name: str) -> str:
 
 
 def ollama_model_available() -> bool:
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-    model = os.getenv("OLLAMA_MODEL", "llama3")
+    base_url = get_ollama_base_url()
+    model = get_ollama_model()
     normalized_model = normalize_model_name(model)
     try:
         response = requests.get(f"{base_url}/api/tags", timeout=OLLAMA_DISCOVERY_TIMEOUT_SECONDS)
@@ -285,8 +310,8 @@ def ollama_model_available() -> bool:
 
 
 def call_ollama(messages: list[dict[str, str]]) -> str:
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-    model = os.getenv("OLLAMA_MODEL", "llama3")
+    base_url = get_ollama_base_url()
+    model = get_ollama_model()
     response = requests.post(
         f"{base_url}/api/chat",
         json={"model": model, "messages": messages, "stream": False},
