@@ -79,4 +79,3 @@ Recommended for production:
 - Loading indicator
 - Error alerts
 - Light/Dark theme switch (persisted in browser storage)
-

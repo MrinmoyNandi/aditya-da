@@ -31,16 +31,28 @@ class ChatResponse(BaseModel):
 app = FastAPI(title="Aditya DA Chatbot")
 
 
-FRONTEND_HTML = """
+def int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
+OLLAMA_DISCOVERY_TIMEOUT_SECONDS = int_env("OLLAMA_DISCOVERY_TIMEOUT_SECONDS", 5)
+PROVIDER_REQUEST_TIMEOUT_SECONDS = int_env("PROVIDER_REQUEST_TIMEOUT_SECONDS", 60)
+
+
+FRONTEND_TEMPLATE = """
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Aditya DA Chatbot</title>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <script crossorigin src="https://unpkg.com/@mui/material@5/umd/material-ui.development.js"></script>
+    <script crossorigin src="__REACT_SCRIPT__"></script>
+    <script crossorigin src="__REACT_DOM_SCRIPT__"></script>
+    <script crossorigin src="__MUI_SCRIPT__"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <style>
       html, body, #root { margin: 0; padding: 0; width: 100%; height: 100%; }
@@ -220,6 +232,21 @@ def app_mode() -> str:
     return "local"
 
 
+def frontend_html() -> str:
+    html = FRONTEND_TEMPLATE
+    if app_mode() == "deployed":
+        return (
+            html.replace("__REACT_SCRIPT__", "https://unpkg.com/react@18/umd/react.production.min.js")
+            .replace("__REACT_DOM_SCRIPT__", "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js")
+            .replace("__MUI_SCRIPT__", "https://unpkg.com/@mui/material@5/umd/material-ui.production.min.js")
+        )
+    return (
+        html.replace("__REACT_SCRIPT__", "https://unpkg.com/react@18/umd/react.development.js")
+        .replace("__REACT_DOM_SCRIPT__", "https://unpkg.com/react-dom@18/umd/react-dom.development.js")
+        .replace("__MUI_SCRIPT__", "https://unpkg.com/@mui/material@5/umd/material-ui.development.js")
+    )
+
+
 def cloud_providers_in_priority() -> list[str]:
     providers: list[str] = []
     if os.getenv("GEMINI_API_KEY"):
@@ -240,6 +267,7 @@ def build_messages(history: list[ChatMessage], user_message: str) -> list[dict[s
 
 
 def normalize_model_name(model_name: str) -> str:
+    """Extract base model name from tagged variants like 'llama3:latest'."""
     return model_name.split(":", maxsplit=1)[0]
 
 
@@ -248,7 +276,7 @@ def ollama_model_available() -> bool:
     model = os.getenv("OLLAMA_MODEL", "llama3")
     normalized_model = normalize_model_name(model)
     try:
-        response = requests.get(f"{base_url}/api/tags", timeout=5)
+        response = requests.get(f"{base_url}/api/tags", timeout=OLLAMA_DISCOVERY_TIMEOUT_SECONDS)
         response.raise_for_status()
         models = response.json().get("models", [])
         return any(normalize_model_name(item.get("name", "")) == normalized_model for item in models)
@@ -262,7 +290,7 @@ def call_ollama(messages: list[dict[str, str]]) -> str:
     response = requests.post(
         f"{base_url}/api/chat",
         json={"model": model, "messages": messages, "stream": False},
-        timeout=60,
+        timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     data = response.json()
@@ -289,13 +317,15 @@ def call_gemini(messages: list[dict[str, str]]) -> str:
                 "parts": [{"text": content}],
             }
         )
+    if not contents:
+        raise RuntimeError("Gemini request requires at least one non-system message.")
     response = requests.post(
         url,
         json={
             "system_instruction": system_instruction,
-            "contents": contents or [{"role": "user", "parts": [{"text": ""}]}],
+            "contents": contents,
         },
-        timeout=60,
+        timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     data = response.json()
@@ -311,7 +341,7 @@ def call_openai(messages: list[dict[str, str]]) -> str:
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         json={"model": model, "messages": messages},
-        timeout=60,
+        timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     data = response.json()
@@ -327,7 +357,7 @@ def call_groq(messages: list[dict[str, str]]) -> str:
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         json={"model": model, "messages": messages},
-        timeout=60,
+        timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     data = response.json()
@@ -393,7 +423,7 @@ def pick_provider(payload: ChatRequest) -> tuple[str | None, ChatResponse | None
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    return FRONTEND_HTML
+    return frontend_html()
 
 
 @app.post("/api/chat", response_model=ChatResponse)
