@@ -292,7 +292,7 @@ def build_messages(history: list[ChatMessage], user_message: str) -> list[dict[s
 
 
 def normalize_model_name(model_name: str) -> str:
-    """Extract base model name from tagged variants like 'llama3:latest'."""
+    """Extract base model name from tagged variants (e.g., 'llama3:latest' -> 'llama3')."""
     return model_name.split(":", maxsplit=1)[0]
 
 
@@ -344,12 +344,12 @@ def call_gemini(messages: list[dict[str, str]]) -> str:
         )
     if not contents:
         raise RuntimeError("Gemini request requires at least one non-system message.")
+    payload: dict[str, Any] = {"contents": contents}
+    if system_instruction is not None:
+        payload["system_instruction"] = system_instruction
     response = requests.post(
         url,
-        json={
-            "system_instruction": system_instruction,
-            "contents": contents,
-        },
+        json=payload,
         timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
@@ -467,6 +467,8 @@ def chat(payload: ChatRequest) -> ChatResponse:
         if exc.response is not None:
             details = f" (status: {exc.response.status_code})"
         return ChatResponse(error=f"{selected_provider} request failed{details}. Check provider configuration and connectivity.")
-    except (KeyError, IndexError, TypeError, RuntimeError):
+    except RuntimeError as exc:
+        return ChatResponse(error=f"{selected_provider} configuration/runtime error: {exc}")
+    except (KeyError, IndexError, TypeError):
         return ChatResponse(error=f"{selected_provider} response format was invalid or incomplete.")
     return ChatResponse(reply=reply, provider=selected_provider)
